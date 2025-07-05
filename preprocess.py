@@ -1,3 +1,4 @@
+import base64
 import glob
 import os
 import re
@@ -5,6 +6,7 @@ from langchain_core.documents import Document
 import numpy as np
 from google import genai
 from langchain_huggingface import HuggingFaceEmbeddings
+from ollama import embeddings
 from pypdf import PdfReader
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -12,14 +14,37 @@ import json
 from langchain_community.vectorstores import FAISS
 import faiss
 from langchain_community.docstore.in_memory import InMemoryDocstore
+import streamlit as st
 
 
 vecto_db_path = r"D:\Python plus\NLP_AI\src\nlp\proj\resume_evaluation-upgrade\faiss_index"
 load_dotenv()
 client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 embedder = HuggingFaceEmbeddings(model_name="bkai-foundation-models/vietnamese-bi-encoder", )
-faiss_db = FAISS.load_local(vecto_db_path,embedder, allow_dangerous_deserialization=True)
 
+
+def show_pdf(pdf_file):
+    # Đọc file PDF và encode base64 để hiển thị trên Streamlit
+    base64_pdf = base64.b64encode(pdf_file.read()).decode('utf-8')
+    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600px" type="application/pdf"></iframe>'
+    st.markdown(pdf_display, unsafe_allow_html=True)
+    pdf_file.seek(0)  # Reset lại con trỏ file để không ảnh hưởng đến các thao tác khác
+
+
+def check_vector_db():
+    """
+    Check if the vector database exists, if not, create it.
+    """
+    if not os.path.exists(vecto_db_path):
+        print("Creating vector database directory...")
+        index = faiss.IndexFlatL2(len(embedder.embed_query("hello world")))
+        faiss_db = FAISS(
+            embedding_function=embedder,
+            index=index,
+            docstore=InMemoryDocstore(),
+            index_to_docstore_id={},
+        )
+        faiss_db.save_local(vecto_db_path)
 
 def extract_text_from_pdf(file_path):
     """
@@ -54,24 +79,22 @@ def chunk_text(texts, n, overlap):
         chunk.append(texts[i:i + n])
     return chunk
 
-
-def store_to_faiss(jd_name,chunks, embeddings_chunk, path=vecto_db_path):
+def store_to_faiss(jd_name, chunks, embeddings_chunk):
+    check_vector_db()
+    # Always load the current DB to append, never create new
+    vector_store = FAISS.load_local(vecto_db_path, embedder, allow_dangerous_deserialization=True)
     for i, (chunk, embedding) in tqdm(enumerate(zip(chunks, embeddings_chunk))):
-        faiss_db.add_texts(
+        vector_store.add_texts(
             texts=[chunk],
             embeddings=[embedding],
-            metadatas=[{"index": i, "name": jd_name}],
+            metadatas=[{"index": i, "name": jd_name}]
         )
-    faiss_db.save_local(path)
-    return faiss_db
+    vector_store.save_local(vecto_db_path)
 
-
-def response_to_json(response, path=None):
-    """
-    Convert the response text to a structured JSON format.
-    :param response: The response text from the model.
-    :return: A dictionary containing the structured data.
-    """
+# Convert the response text to a structured JSON format and store it in the vector database.
+def response_to_json(jd_name, response, path=None):
+    check_vector_db()
+    vecto_db = FAISS.load_local(vecto_db_path, embedder, allow_dangerous_deserialization=True)
     metadata = {}
     pattern = r"\*\*\s*(\w+):\*\*\s*(.+)"
     if not response or path is None:
@@ -82,25 +105,35 @@ def response_to_json(response, path=None):
         if match:
             key = match.group(1).strip()
             value = match.group(2).strip()
-            # If the value contains commas, treat it as a list
             if ',' in value and key == "skill":
                 value = [v.strip() for v in value.split(',')]
             metadata[key] = value
-    with open(os.path.join(r"D:\Python plus\NLP_AI\src\rag\jd", path), "w", encoding="utf-8") as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=4)
-    return metadata
+    brief_jd = json.dumps(metadata, ensure_ascii=False, indent=4)
+    jd_embedding = create_embeddings(brief_jd, embedder)
+    document = Document(
+        page_content=brief_jd,
+        metadata={"resume_id": os.path.join('brief', jd_name)}
+    )
+    vecto_db.add_documents(
+        documents=[document],
+        embeddings=[jd_embedding],
+    )
+    vecto_db.save_local(vecto_db_path)
 
 
-def resume_to_json(resume_text, vecto_db):
-    jsonstr = json.loads(resume_text.split('```json')[1].split('```')[0].strip())
-    text = "{}".format(jsonstr)
-    if jsonstr is not None:
+def resume_to_json(resume_text,pdf_path=None):
+    check_vector_db()
+    vecto_db = FAISS.load_local(vecto_db_path, embedder, allow_dangerous_deserialization=True)
+    text = "{}".format(resume_text)
+    if resume_text is not None:
+        embedding = create_embeddings(text, embedder)
         document = Document(
             page_content=text,
-            metadata={"cv_id": "resume_data"}
+            metadata={"cv_id": "resume_data","pdf_path": pdf_path}
         )
         vecto_db.add_documents(
             documents=[document],
+            embeddings=[embedding],
         )
         vecto_db.save_local(vecto_db_path)
 
@@ -144,8 +177,6 @@ def rerank_results(query, results, top_n=3, model="gemini-2.0-flash", path=None)
 
         # Extract the score from the LLM response
         score_text = response.text.strip()  # Clean up the response text
-        print(f"LLM Response: {score_text}")  # Print the LLM response for debugging
-        # Use regex to extract the numerical score
         score_match = re.search(r'\b(10|[0-9])\b', score_text)
         if score_match:
             score = float(score_match.group(1))
@@ -171,17 +202,20 @@ def rerank_results(query, results, top_n=3, model="gemini-2.0-flash", path=None)
 
 def jd_requirement(jd_path,reranking_method="llm", top_n=3, model="gemini-2.0-flash",
                    path=None):
+
     jd_name = os.path.basename(str(jd_path)).split(".")[0]
     jd_text = extract_text_from_pdf(jd_path)
     chunks = chunk_text(jd_text, 200, 30)
-    chunk_embeddings = [create_embeddings(chunk, embedder) for chunk in tqdm(chunks)]
-    store_to_faiss(jd_name,chunks, chunk_embeddings, path=vecto_db_path)
+    embedding_chunks = [create_embeddings(chunk, embedder) for chunk in tqdm(chunks)]
+    store_to_faiss(jd_name, chunks, embedding_chunks)
+    # Load DB again for querying after adding JD
+    vecto_store = FAISS.load_local(vecto_db_path, embedder, allow_dangerous_deserialization=True)
 
     jd_query = f"""
     Tôi muốn bạn tạo ra metadata gồm các trường như: 'skill', 'education', 'certification', 'soft_skill', 'experience' từ job description"""
     jd_system_promt = "bạn là một trợ lý AI thông minh có khả năng tạo metadata cho job description hãy sử dụng thông tin job description trong context tạo ra metadata theo query nếu trường thông tin nào không có hãy trả lời là không yêu cầu . Trả lời bằng tiếng Việt."
 
-    initial_results = faiss_db.similarity_search_with_score(jd_query, k=10, filter={"name": jd_name})
+    initial_results = vecto_store.similarity_search_with_score(jd_query, k=10, filter={"name": jd_name})
     if reranking_method == "llm":
         reranked_results = rerank_results(jd_query, initial_results, top_n=top_n)
     else:
@@ -199,8 +233,7 @@ def jd_requirement(jd_path,reranking_method="llm", top_n=3, model="gemini-2.0-fl
             """
 
     response = generate_response(jd_system_promt, user_prompt, model)
-    response_to_json(response, path=path)
-
+    # response_to_json(jd_name,response, path=path)
     return {
         "query": jd_query,
         "reranking_method": reranking_method,
@@ -211,7 +244,8 @@ def jd_requirement(jd_path,reranking_method="llm", top_n=3, model="gemini-2.0-fl
     }
 
 
-def extract_candidate_info(text, model="gemini-2.0-flash"):
+def extract_candidate_info(text, model="gemini-2.0-flash",pdf_path=None):
+    vecto_db = FAISS.load_local(vecto_db_path, embedder, allow_dangerous_deserialization=True)
     eval_system_promt = f"""
             Là một Hệ thống AI Đánh giá resume. có kỹ năng với kiến thức chuyên sâu về công nghệ và công nghệ thông tin, vai trò của bạn là đánh giá tỉ mỉ sơ yếu lý lịch của ứng viên dựa trên mô tả công việc được cung cấp.
 
@@ -279,7 +313,7 @@ def extract_candidate_info(text, model="gemini-2.0-flash"):
 
     response = generate_response(eval_system_promt, user_prompt, model)
     brief_info = json.loads(response.split('```json')[1].split('```')[0].strip())
-    resume_to_json(response, faiss_db)
+    resume_to_json(brief_info,pdf_path=pdf_path)
     return {
         "user_prompt": user_prompt,
         "eval_system_promt": eval_system_promt,
@@ -289,7 +323,8 @@ def extract_candidate_info(text, model="gemini-2.0-flash"):
 
 
 def evaluate_resume(jd):
-    faiss_dbe = FAISS.load_local(vecto_db_path, embedder, allow_dangerous_deserialization=True)
+    check_vector_db()
+    vecto_db = FAISS.load_local(vecto_db_path, embedder, allow_dangerous_deserialization=True)
     query = f"cho tôi ứng viên hàng đầu phù hợp với jd này {jd}"
     eval_system_promt = f"""
                Là một Hệ thống AI Đánh giá resume. có kỹ năng với kiến thức chuyên sâu về công nghệ và công nghệ thông tin, vai trò của bạn là đánh giá tỉ mỉ sơ yếu lý lịch của ứng viên dựa trên mô tả công việc được cung cấp.
@@ -302,11 +337,8 @@ def evaluate_resume(jd):
 
                Hãy nhớ sử dụng chuyên môn của bạn về công nghệ và công nghệ thông tin để tiến hành đánh giá toàn diện nhằm tối ưu hóa quy trình tuyển dụng cho công ty tuyển dụng. Những hiểu biết sâu sắc của bạn sẽ đóng vai trò quan trọng trong việc xác định ứng viên có phù hợp với vai trò công việc hay không.
               """
-    print(f"Running similarity search for query: {query}")
-    results = faiss_dbe.similarity_search_with_score(query, k=12, filter={"cv_id": "resume_data"})
-    for i, (result, similarity_score) in enumerate(results):
-        print(result.page_content)
 
+    results = vecto_db.similarity_search_with_score(query, k=10, filter={"cv_id": "resume_data"})
     print(f"Found {len(results)} results for query: {query}")
 
     reranked_results = rerank_results(query, results, top_n=4)
@@ -318,14 +350,32 @@ def evaluate_resume(jd):
 
             Đầu ra đánh giá:
             1. Tính tỷ lệ phần trăm khớp giữa sơ yếu lý lịch và mô tả công việc. Đưa ra một con số và một số giải thích
-            2. dựa vào tỷ lệ phần trăm khớp giữa sơ yếu lý lịch và mô tả công việc, hãy kết luận resume này phù hợp hay không phù hợp với yêu cầu công việc. trả lời  1 nếu phù hợp và 0 nếu không phù hợp vừa đưa ra lý do giải thích quyết định.
-            nếu phù hợp hãy tạo metadata  gồm các trường như sau: 'name: [ Tên Ưng viên]', 'suitable_rate: [tỉ lệ khớp]','candidate_strength':[các điểm mạnh của ứng viên] ,'reason: [những lí do phù hợp]'
+            2. dựa vào tỷ lệ phần trăm khớp giữa sơ yếu lý lịch và mô tả công việc, ngưỡng sẽ là 65%, hãy kết luận resume này phù hợp hay không phù hợp với yêu cầu công việc. trả lời  1 nếu phù hợp và 0 nếu không phù hợp vừa đưa ra lý do giải thích quyết định.
+            nếu phù hợp hãy tạo metadata  gồm các trường như sau: 'name: [ Tên Ưng viên]', 'suitable_rate: [tỉ lệ khớp]','candidate_strength':[các điểm mạnh của ứng viên] ,'reason: [những lí do phù hợp]'.
             """
     response = generate_response(eval_system_promt, user_prompt, model="gemini-2.0-flash")
+    print("Response from model:", response)
+    json_blocks = re.findall(r'```json\s*({.*?})\s*```', response, re.DOTALL)
+
+    candidate_list = []
+    for block in json_blocks:
+        try:
+            metadata = json.loads(block)
+            metadata['suitable_rate'] = int(metadata['suitable_rate'].replace('%', ''))  # Chuyển đổi tỷ lệ khớp sang số nguyên
+            candidate_list.append(metadata)
+        except Exception as e:
+            print("Lỗi parse JSON:", e)
+
+    print(candidate_list)
+
+    candidate_list = sorted(candidate_list, key=lambda x: x['suitable_rate'], reverse=True)
+    print(f"Found {len(candidate_list)} candidates after evaluation.")
+
     return {
         "user_prompt": user_prompt,
         "eval_system_promt": eval_system_promt,
-        "response": response
+        "response": response,
+        "candidates_info": candidate_list
     }
 
 
@@ -347,77 +397,14 @@ def generate_response(system_promt, user_prompt, model="gemini-2.0-flash"):
     return response.text
 
 def brief_resume(pdf_path, model="gemini-2.0-flash"):
-
+    check_vector_db()
     if not pdf_path:
         return {}
 
     resume_text = extract_text_from_pdf(pdf_path)
-    response = extract_candidate_info(resume_text,model=model)
-
+    response = extract_candidate_info(resume_text,model=model,pdf_path=pdf_path)
     return response
 
-def run():
-    # file_paths = [
-    #     r"D:\Python plus\NLP_AI\src\rag\data\TTS_Java.pdf",
-    # ]
-    vector_db_path = r"D:\Python plus\NLP_AI\src\nlp\proj\resume_evaluation-upgrade\faiss_index"
-
-    # json_path = r"D:\Python plus\NLP_AI\src\rag\jd\{}.json".format(os.path.basename(file_paths[0]).split(".")[0])
-    # job_description = extract_text_from_pdf(file_paths[0])
-    #
-    # resume_path = r"D:\Python plus\NLP_AI\src\nlp\proj\resume_evaluation-upgrade\resume\*.pdf"
-    # resumes = glob.glob(resume_path)
-    #
-    # chunks = chunk_text(job_description, 200, 30)
-    # chunk_embeddings = [create_embeddings(chunks, embedder) for chunks in tqdm(chunks)]
-
-
-    # faiss_db = store_to_faiss(faiss_db, chunks, chunk_embeddings, path=vector_db_path)
-
-    # jd_requirement(jd_query, jd_system_promt, faiss_db, reranking_method="llm", top_n=3, model="gemini-2.0-flash",
-    #                path=json_path)
-
-    
-    #
-    faiss_db = FAISS.load_local(vector_db_path, embedder, allow_dangerous_deserialization=True)
-    with open(r"/jd/AI Engineer Fresher.json", "r", encoding="utf-8") as f:
-        jd = json.load(f)
-
-    query = f"cho tôi ứng viên hàng đầu phù hợp với jd này {jd}"
-    eval_system_promt = f"""
-               Là một Hệ thống AI Đánh giá resume. có kỹ năng với kiến thức chuyên sâu về công nghệ và công nghệ thông tin, vai trò của bạn là đánh giá tỉ mỉ sơ yếu lý lịch của ứng viên dựa trên mô tả công việc được cung cấp.
-
-               Đánh giá của bạn sẽ bao gồm việc phân tích sơ yếu lý lịch để tìm các kỹ năng, kinh nghiệm và trình độ phù hợp với yêu cầu công việc. Tìm kiếm các từ khóa chính và tiêu chí cụ thể được nêu trong mô tả công việc để xác định ứng viên có phù hợp với vị trí này hay không.
-
-               Cung cấp đánh giá chi tiết về mức độ phù hợp của sơ yếu lý lịch với các yêu cầu công việc, nêu bật điểm mạnh, điểm yếu và bất kỳ lĩnh vực nào có thể quan tâm.
-
-               Đánh giá của bạn phải toàn diện, chính xác và khách quan, đảm bảo rằng các ứng viên đủ điều kiện nhất được xác định chính xác dựa trên nội dung sơ yếu lý lịch của họ liên quan đến tiêu chí công việc.
-
-               Hãy nhớ sử dụng chuyên môn của bạn về công nghệ và công nghệ thông tin để tiến hành đánh giá toàn diện nhằm tối ưu hóa quy trình tuyển dụng cho công ty tuyển dụng. Những hiểu biết sâu sắc của bạn sẽ đóng vai trò quan trọng trong việc xác định ứng viên có phù hợp với vai trò công việc hay không.
-              """
-    print(f"Running similarity search for query: {query}")
-    results = faiss_db.similarity_search_with_score(query, k=12, filter={"cv_id": "resume_data"})
-    for i, (result, similarity_score) in enumerate(results):
-        print(result.page_content)
-
-    print(f"Found {len(results)} results for query: {query}")
-
-    reranked_results = rerank_results(query, results, top_n=4)
-    context = "\n\n===\n\n".join([result['text'] for result in reranked_results])
-    user_prompt = f"""
-            hãy dựa vào thông tin các ứng viên cung cấp từ context và đánh giá ứng viên nào phù hợp với yêu cầu công việc nhất
-            context: {context}
-            job requirement: {jd}.
-
-            Đầu ra đánh giá:
-            1. Tính tỷ lệ phần trăm khớp giữa sơ yếu lý lịch và mô tả công việc. Đưa ra một con số và một số giải thích
-            2. dựa vào tỷ lệ phần trăm khớp giữa sơ yếu lý lịch và mô tả công việc, hãy kết luận resume này phù hợp hay không phù hợp với yêu cầu công việc. trả lời  1 nếu phù hợp và 0 nếu không phù hợp vừa đưa ra lý do giải thích quyết định.
-            nếu phù hợp hãy tạo metadata  gồm các trường như sau: 'name: [ Tên Ưng viên]', 'suitable_rate: [tỉ lệ khớp]','candidate_strength':[các điểm mạnh của ứng viên] ,'reason: [những lí do phù hợp]'
-            """
-    response = generate_response(eval_system_promt, user_prompt, model="gemini-2.0-flash")
-    print("Response:", response)
-if __name__ == '__main__':
-    run()
 
 
 
