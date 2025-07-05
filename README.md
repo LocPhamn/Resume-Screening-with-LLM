@@ -1,4 +1,4 @@
-# 📄 Resume Evaluation with Streamlit + NLP
+# 📄 Resume Screening with LLM
 
 This project is a Resume Evaluation web application built with **Streamlit**, utilizing **NLP**, **PDF parsing**, and **semantic similarity** techniques. It extracts structured data from PDF resumes and evaluates how well a candidate’s profile matches a specific job role (e.g., Web Developer, Data Scientist, etc.).
 
@@ -6,10 +6,10 @@ This project is a Resume Evaluation web application built with **Streamlit**, ut
 
 ## 🚀 Features
 
-- 📄 Read and clean raw text data from uploaded PDF resume files
-- 🧠 Extract important details: Name, Email, Phone, Address, Skills, Experience, and Profile Summary
-- 📊 Evaluate resumes using **SentenceTransformer** embeddings and cosine similarity
-- 🔎 Recommend job roles based on detected skills (Web Dev, Data Science, Android, iOS, UI/UX)
+- 📄 Read and clean raw text data from uploaded PDF resume files and job descriptions
+- 🧠 Summarize resume content and job description using Gemini 2.0 flash. embedding summarization resume with bkai-foundation-models/vietnamese-bi-encoder model from HuggingFace and store the results in a vector database
+- 📊 Evaluate and identify suitable resumes for a given job description by retrieving relevant resume information using RAG (Retrieval-Augmented Generation) techniques. Then, use Gemini to analyze the retrieved content and generate a final assessment of the most suitable candidates.
+- 🔎Rank the top matching resumes for the recruiter based on their relevance to the job description
 - 🖥️ User-friendly Streamlit interface for uploading and viewing analysis results
 
 ---
@@ -18,78 +18,24 @@ This project is a Resume Evaluation web application built with **Streamlit**, ut
 
 - Python
 - Streamlit
-- spaCy
-- Sentence Transformers (HuggingFace)
-- PDFMiner.six
-- wordninja
-- Regex for text processing
+- langchain
+- HuggingFace
 
 ---
-## Screenshots
+## Extract Candidate Information
 
-![resume ui](./images/resume.png)
-![resume ui](./images/resume2.png)
+![resume ui](./images/img.png)
+![resume ui](./images/img_1.png)
 
-## 📦 Installation
+## Evaluate Candidate
+![resume ui](./images/img_2.png)
+![resume ui](./images/img_3.png)
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/resume-evaluation.git
-cd resume-evaluation
 
-# Create a virtual environment (optional)
-python -m venv venv
-source venv/bin/activate  # or venv\Scripts\activate on Windows
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Download spaCy model
-python -m spacy download en_core_web_sm
-# 📄 Resume Evaluation with Streamlit + NLP
-
-This project is a Resume Evaluation web application built with **Streamlit**, utilizing **NLP**, **PDF parsing**, and **semantic similarity** techniques. It extracts structured data from PDF resumes and evaluates how well a candidate’s profile matches a specific job role (e.g., Web Developer, Data Scientist, etc.).
-
----
-
-## 🚀 Features
-
-- 📄 Read and clean raw text data from uploaded PDF resume files
-- 🧠 Extract important details: Name, Email, Phone, Address, Skills, Experience, and Profile Summary
-- 📊 Evaluate resumes using **SentenceTransformer** embeddings and cosine similarity
-- 🔎 Recommend job roles based on detected skills (Web Dev, Data Science, Android, iOS, UI/UX)
-- 🖥️ User-friendly Streamlit interface for uploading and viewing analysis results
-
----
-
-## 🛠️ Tech Stack
-
-- Python
-- Streamlit
-- spaCy
-- Sentence Transformers (HuggingFace)
-- PDFMiner.six
-- wordninja
-- Regex for text processing
-
----
-## Screenshots
-![Resume UI](./images/resume.png)
-![Resume UI](./images/resume2.png)
-
-## 📦 Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/resume-evaluation.git
-cd resume-evaluation
-
-# Create a virtual environment (optional)
-python -m venv venv
-source venv/bin/activate  # or venv\Scripts\activate on Windows
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Download spaCy model
-python -m spacy download en_core_web_sm
+> **Note:**  
+> To run this application, you must provide your Google API key.  
+> Please add your `GOOGLE_API_KEY` to a `.env` file in the project root directory:
+>
+> ```
+> GOOGLE_API_KEY=your_google_api_key_here
+> ```
